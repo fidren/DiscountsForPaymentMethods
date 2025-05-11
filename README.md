@@ -1,4 +1,6 @@
-# Discounts for Payment Methods
+#Wojciech_Mikula_Java_Krakow
+
+## Discounts for Payment Methods
 
 ## Opis
 Aplikacja optymalizuje sposoby płatności dla zamówień w sklepie internetowym, maksymalizując rabaty i wykorzystując punkty lojalnościowe, jeśli to możliwe.
