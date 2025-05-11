@@ -11,6 +11,16 @@ public class Order {
     private BigDecimal value;
     private List<String> promotions;
 
+    public Order() {
+
+    }
+
+    public Order(String id, BigDecimal value, List<String> promotions) {
+        this.id = id;
+        this.value = value;
+        this.promotions = promotions;
+    }
+
     public String getId() {
         return id;
     }

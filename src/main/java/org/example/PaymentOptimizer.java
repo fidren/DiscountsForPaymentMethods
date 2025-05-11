@@ -5,97 +5,138 @@ import java.math.RoundingMode;
 import java.util.*;
 
 public class PaymentOptimizer {
+    private static final BigDecimal ONE_HUNDRED = new BigDecimal(100);
+    private static final BigDecimal ONE_TENTH = new BigDecimal("0.10");
+
     private List<Order> orders;
     private List<PaymentMethod> paymentMethods;
-    private Map<String, PaymentMethod> methodMap;
-    private Map<String, BigDecimal> limitsMap;
+    private Map<String, BigDecimal> spent = new HashMap<>();
+    private Map<String, PaymentMethod> methodMap = new HashMap<>();
 
-    public PaymentOptimizer(List<Order> orders, List<PaymentMethod> paymentMethods, Map<String, PaymentMethod> methodMap, Map<String, BigDecimal> limitsMap) {
+    public PaymentOptimizer(List<Order> orders, List<PaymentMethod> paymentMethods) {
         this.orders = orders;
         this.paymentMethods = paymentMethods;
-        this.methodMap = methodMap;
-        this.limitsMap = limitsMap;
-    }
-
-    public void calculateBestSolution() {
-        for(Order order : orders) {
-            List<PaymentOption> options = new ArrayList<>();
-            BigDecimal value = order.getValue();
-
-            if(limitsMap.get("PUNKTY").compareTo(value) >= 0) {
-                options.add(pointsPaymentOption(value, methodMap.get("PUNKTY").getDiscount()));
-            }
-            options.addAll(cardPaymentOption(value, order.getPromotions()));
-            if(limitsMap.get("PUNKTY").compareTo(BigDecimal.ZERO) >= 0) {
-                options.addAll(mixedPaymentOption(value, order.getPromotions()));
-            }
-
-            options.sort(Comparator.comparing(PaymentOption::getDiscountAmount)
-                    .thenComparing(PaymentOption::getPointsUsed)
-                    .thenComparing(PaymentOption::getCardUsed).reversed());
-
-            if(!options.isEmpty()) {
-                PaymentOption bestOption = options.getFirst();
-                System.out.println("ORDER " + order.getId() + " -> " + bestOption);
-
-                updateLimits(bestOption);
-            } else {
-                System.out.println("ORDER " + order.getId() + " -> BRAK OPCJI");
-            }
+        for (PaymentMethod pm : paymentMethods) {
+            methodMap.put(pm.getId(), pm);
+            spent.put(pm.getId(), BigDecimal.ZERO);
         }
     }
 
-    private void updateLimits(PaymentOption bestOption) {
-        limitsMap.put("PUNKTY", limitsMap.get("PUNKTY").subtract(bestOption.getPointsUsed()));
-        if (!bestOption.getMethod().equals("PUNKTY")) {
-            String card = bestOption.getMethod().replace("PUNKTY + ", "");
-            limitsMap.put(card, limitsMap.get(card).subtract(bestOption.getCardUsed()));
-        }
+    public Map<String, BigDecimal> getSpent() {
+        return spent;
     }
 
-    private List<PaymentOption> mixedPaymentOption(BigDecimal value, List<String> promotions) {
-        List<PaymentOption> options = new ArrayList<>();
-        BigDecimal tenPercent = value.multiply(BigDecimal.valueOf(0.10)).setScale(2, RoundingMode.HALF_UP);
+    public void optimize(){
+        List<Option> options = collectPotentialCardToOrders();
+        options.sort((a, b) -> b.discount().compareTo(a.discount()));
+        Set<String> assignedOrders = assignOrdersToCard(options);
+        handleUnassignedOrders(assignedOrders);
+    }
 
-        BigDecimal pointsToUse = limitsMap.get("PUNKTY").min(value);
-        if(pointsToUse.compareTo(BigDecimal.ZERO) == 0) {
-            return Collections.emptyList();
-        }
-        BigDecimal cardValueNeeded = value.subtract(pointsToUse);
-        for (PaymentMethod m : paymentMethods) {
-            if(!m.getId().equals("PUNKTY") && limitsMap.get(m.getId()).compareTo(cardValueNeeded) >= 0){
-                boolean promo = pointsToUse.compareTo(tenPercent) >= 0;
-                BigDecimal discount = promo ? tenPercent : BigDecimal.ZERO;
-                if(cardValueNeeded.compareTo(discount) > 0) {
-                    options.add(new PaymentOption("PUNKTY + " + m.getId(), pointsToUse, cardValueNeeded.subtract(discount), discount));
-                } else {
-                    options.add(new PaymentOption("PUNKTY + " + m.getId(), pointsToUse.subtract(discount.subtract(cardValueNeeded)), BigDecimal.ZERO, discount));
+    private List<Option> collectPotentialCardToOrders(){
+        List<Option> options = new ArrayList<>();
+        for (Order order : orders) {
+            if (order.getPromotions() != null) {
+                for (String promo : order.getPromotions()) {
+                    PaymentMethod card = methodMap.get(promo);
+                    if (card != null && !promo.equals("PUNKTY") && card.getLimit().compareTo(order.getValue()) >= 0) {
+                        BigDecimal discount = order.getValue().multiply(card.getDiscount()).divide(ONE_HUNDRED);
+                        options.add(new Option(order.getId(), card.getId(), discount));
+                    }
                 }
             }
         }
         return options;
     }
 
-    private List<PaymentOption> cardPaymentOption(BigDecimal value, List<String> promotions) {
-        List<PaymentOption> options = new ArrayList<>();
-        for (PaymentMethod m : paymentMethods) {
-            if (!m.getId().equals("PUNKTY") && limitsMap.get(m.getId()).compareTo(value) >= 0) {
-                boolean promo = promotions != null && promotions.contains(m.getId());
-                BigDecimal discount = promo ? value.multiply(BigDecimal.valueOf(m.getDiscount())).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP) : BigDecimal.ZERO;
-                options.add(new PaymentOption(m.getId(), BigDecimal.ZERO, value.subtract(discount), discount));
+    private Set<String> assignOrdersToCard(List<Option> options) {
+        Set<String> assignedOrders = new HashSet<>();
+        for (Option opt : options) {
+            if (!assignedOrders.contains(opt.orderId())) {
+                Order order = orders.stream().filter(o -> o.getId().equals(opt.orderId())).findFirst().orElse(null);
+                PaymentMethod card = methodMap.get(opt.cardId());
+                if (order != null && card != null && card.getLimit().compareTo(order.getValue()) >= 0) {
+                    BigDecimal discount = order.getValue().multiply(card.getDiscount()).divide(ONE_HUNDRED);
+                    BigDecimal paid = order.getValue().subtract(discount);
+                    card.setLimit(card.getLimit().subtract(order.getValue()));
+                    spent.put(card.getId(), spent.get(card.getId()).add(paid));
+                    assignedOrders.add(order.getId());
+                }
             }
         }
-        return options;
+        return assignedOrders;
     }
 
-    private PaymentOption pointsPaymentOption(BigDecimal value, int pointsDiscount) {
-        BigDecimal discount = value.multiply(BigDecimal.valueOf(pointsDiscount)).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-        return new PaymentOption("PUNKTY", value.subtract(discount), BigDecimal.ZERO, discount);
+    private void handleUnassignedOrders(Set<String> assignedOrders) {
+        PaymentMethod points = methodMap.get("PUNKTY");
+        for (Order order : orders) {
+            if (assignedOrders.contains(order.getId())) continue;
+
+            if (canFullyPayWithPoints(order, points)) {
+                payFullyWithPoints(order, points);
+                continue;
+            }
+
+            if (canPartiallyPayWithPoints(order, points)) {
+                payPartiallyWithPointsAndCard(order, points);
+                continue;
+            }
+
+            payFullyByCard(order);
+        }
     }
 
-    void printResult(){
-        for (PaymentMethod pm : paymentMethods) {
-            System.out.println(pm.getId() + " " + pm.getLimit().subtract(limitsMap.get(pm.getId())));
+    private boolean canFullyPayWithPoints(Order order, PaymentMethod points) {
+        return points != null && points.getLimit().compareTo(order.getValue()) >= 0;
+    }
+
+    private void payFullyWithPoints(Order order, PaymentMethod points) {
+        BigDecimal discount = order.getValue().multiply(points.getDiscount()).divide(ONE_HUNDRED);
+        BigDecimal paid = order.getValue().subtract(discount);
+        points.setLimit(points.getLimit().subtract(paid));
+        spent.put("PUNKTY", spent.get("PUNKTY").add(paid));
+    }
+
+    private boolean canPartiallyPayWithPoints(Order order, PaymentMethod points) {
+        BigDecimal tenPercent = order.getValue().multiply(ONE_TENTH);
+        return points != null && points.getLimit().compareTo(tenPercent) >= 0;
+    }
+
+    private void payPartiallyWithPointsAndCard(Order order, PaymentMethod points) {
+        BigDecimal pointsUsed = points.getLimit().min(order.getValue());
+        BigDecimal discount = order.getValue().multiply(ONE_TENTH);
+        BigDecimal toPay = order.getValue().subtract(discount);
+        BigDecimal rest = toPay.subtract(pointsUsed);
+
+        PaymentMethod card = pickAnyCardWithSufficientLimit(rest);
+
+        if (card != null) {
+            points.setLimit(points.getLimit().subtract(pointsUsed));
+            card.setLimit(card.getLimit().subtract(rest));
+            spent.put("PUNKTY", spent.get("PUNKTY").add(pointsUsed));
+            spent.put(card.getId(), spent.get(card.getId()).add(rest));
+        }
+    }
+
+    private PaymentMethod pickAnyCardWithSufficientLimit(BigDecimal rest) {
+        return paymentMethods.stream()
+                .filter(pm -> !pm.getId().equals("PUNKTY") && pm.getLimit().compareTo(rest) >= 0)
+                .findFirst().orElse(null);
+    }
+
+    private void payFullyByCard(Order order) {
+        PaymentMethod card = pickAnyCardWithSufficientLimit(order.getValue());
+        if (card != null) {
+            card.setLimit(card.getLimit().subtract(order.getValue()));
+            spent.put(card.getId(), spent.get(card.getId()).add(order.getValue()));
+        }
+    }
+
+    public void printSpent() {
+        for (Map.Entry<String, BigDecimal> entry : spent.entrySet()) {
+            if (entry.getValue().compareTo(BigDecimal.ZERO) > 0) {
+                System.out.println(entry.getKey() + " " + entry.getValue().setScale(2, RoundingMode.HALF_UP));
+            }
         }
     }
 }
